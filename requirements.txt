@@ -1,0 +1,7 @@
+asyncio
+re
+duckduckgo-search
+beautifulsoup4
+tiktoken
+playwright
+gradio
