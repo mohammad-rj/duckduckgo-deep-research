@@ -12,8 +12,11 @@ import gradio as gr
 
 def clean_text(text: str) -> str:
     """Clean text: remove empty lines and duplicates."""
-    text = text.replace("‍", "").replace("‌", "").replace(" ", "")
+    # حذف کاراکترهای اضافی و فاصله‌های نامرئی
+    text = text.replace("‍", "").replace("‌", "").replace(" ", "")
+    # حذف خطوط خالی
     text = re.sub(r'\n\s*\n', '\n', text.strip())
+    # حذف خطوط تکراری
     unique_lines = set()
     cleaned_lines = []
     for line in text.splitlines():
@@ -22,15 +25,15 @@ def clean_text(text: str) -> str:
             cleaned_lines.append(line)
     return "\n".join(cleaned_lines)
 
-def tokenize_and_split(text: str, max_tokens=4000) -> list[str]:
+def tokenize_and_split(text: str, max_tokens: int = 4000) -> list[str]:
     """
     Split text into sections with a maximum of max_tokens using tiktoken.
     """
-    tokenizer = tiktoken.encoding_for_model("gpt-4")  # Change model if needed
+    tokenizer = tiktoken.encoding_for_model("gpt-4")  # یا مدل دیگر
     tokens = tokenizer.encode(text)
     chunks = []
     for i in range(0, len(tokens), max_tokens):
-        chunk = tokens[i:i + max_tokens]
+        chunk = tokens[i : i + max_tokens]
         chunks.append(tokenizer.decode(chunk))
     return chunks
 
@@ -38,14 +41,12 @@ def _sync_summarize_text(
         text: str,
         query: str,
         refined_query_template: str,
-        model="gpt-4o-mini"
+        model: str = "gpt-4o-mini"
 ) -> str:
     """
-    Synchronous function to summarize a text chunk using the specified model
-    and the user-provided refined_query_template.
+    Synchronous function to summarize a text chunk using the specified model.
     """
-    # Use the refined query template from the user
-    # (You can assume refined_query_template includes placeholders like {query} if desired)
+    # در این‌جا از قالب ورودی برای ساخت پرسش استفاده می‌کنیم
     refined_query = refined_query_template.format(query=query)
 
     try:
@@ -62,12 +63,9 @@ async def summarize_chunk_async(
         text: str,
         query: str,
         refined_query_template: str,
-        model="gpt-4o-mini"
+        model: str = "gpt-4o-mini"
 ) -> str:
-    """
-    Asynchronous function to execute synchronous summarization
-    within a Thread Executor to enable parallel processing.
-    """
+    """Run the sync summarization in a thread (to not block the event loop)."""
     return await asyncio.to_thread(
         _sync_summarize_text,
         text,
@@ -76,53 +74,66 @@ async def summarize_chunk_async(
         model
     )
 
+# -------------------------------------------------------
+# Iterative Summarization Core
+# -------------------------------------------------------
+
 def iterative_summarization(
         text: str,
         query: str,
+        refined_query_template: str,
         final_refined_query_template: str,
         summary_length: int,
-        max_tokens=4000,
-        model="gpt-4o-mini"
+        max_tokens: int = 4000,
+        model: str = "gpt-4o-mini"
 ) -> str:
     """
-    Iterative summarization until the text is below max_tokens;
-    and finally a summary with a specified word count (summary_length).
+    1) Iterative summarization until text is below max_tokens.
+    2) Then a final summary with the specified word count (summary_length).
     """
+    # از توکن‌ساز gpt-4 برای محاسبه توکن‌ها استفاده می‌کنیم
     tokenizer = tiktoken.encoding_for_model("gpt-4")
 
-    # 1) Iterative summarization until below max_tokens
+    # === 1) Iterative summarization تا رسیدن به زیر max_tokens ===
+    iteration_count = 0
     while True:
         tokens = tokenizer.encode(text)
         if len(tokens) <= max_tokens:
-            break  # Within the allowed limit
+            # اگر دیگر زیر حداکثر توکن هستیم، خارج می‌شویم
+            break
 
-        print("🔄 Starting iterative summarization process, text exceeds max_tokens.")
-        # Split text into permissible sections
+        iteration_count += 1
+        print(f"🔄 [Round {iteration_count}] Text exceeds {max_tokens} tokens. Starting iterative summarization...")
+
+        # تقسیم متن به بلوک‌های مجاز
         chunks = []
         for i in range(0, len(tokens), max_tokens):
-            chunk = tokens[i:i + max_tokens]
+            chunk = tokens[i : i + max_tokens]
             chunks.append(tokenizer.decode(chunk))
 
-        # Summarize each section
+        # خلاصه کردن هر بلوک و چسباندن نتایج
         new_summaries = []
         for idx, chunk in enumerate(chunks, 1):
-            # Re-use the chunk summarization approach or a minimal approach
-            part_summary = _sync_summarize_text(chunk, query, final_refined_query_template, model=model)
-            new_summaries.append(part_summary)
+            print(f"🗂️ Summarizing chunk {idx}/{len(chunks)} in iterative summarization...")
+            partial_summary = _sync_summarize_text(
+                chunk,
+                query,
+                refined_query_template,  # از refined_query_template برای خلاصه‌سازی بلوک‌ها استفاده می‌کنیم
+                model=model
+            )
+            new_summaries.append(partial_summary)
 
-        # Combine summaries for the next round
+        # متن جدید = الحاق خلاصه‌های به‌دست‌آمده
         text = "\n".join(new_summaries)
-        print("🔄 Iterative summarization round completed.")
+        print(f"🔄 Iterative summarization round {iteration_count} completed.")
 
-    # 2) Create the final summary with specified word count
-    # Use the final refined query template from the user
-    # (Likewise assume it might include placeholders like {summary_length} and {query} if desired)
+    # === 2) نوبت خلاصه‌ی نهایی با تعداد کلمات مشخص ===
     final_refined_query = final_refined_query_template.format(
         summary_length=summary_length,
         query=query
     )
+    print(f"📝 Creating final {summary_length}-word summary with model {model}...")
     try:
-        print(f"📝 Creating final {summary_length}-word summary with model {model}...")
         with DDGS() as ddgs:
             final_summary = ddgs.chat(final_refined_query + f"\n\n{text}", model=model)
         print("✅ Final summarization completed.")
@@ -295,10 +306,12 @@ async def fetch_and_summarize_gradio(
         # 3) Iterative summarization
         await log_callback("📝 Performing iterative summarization...")
         try:
-            final_summary = iterative_summarization(
+            final_summary = await asyncio.to_thread(
+                iterative_summarization,
                 combined_summary,
                 query=query,
-                final_refined_query_template=final_refined_query_template,
+                refined_query_template=refined_query_template,  # برای خلاصه‌سازی بلوک‌ها
+                final_refined_query_template=final_refined_query_template,  # برای خلاصه‌سازی نهایی
                 summary_length=summary_length,
                 max_tokens=4000,
                 model=model
@@ -350,11 +363,11 @@ interface = gr.Interface(
         gr.Number(label="Max results", value=20, precision=0),
         gr.Number(label="Max concurrency", value=10, precision=0),
         gr.Textbox(label="Model", value="gpt-4o-mini"),
-        gr.Number(label="Summary length", value=200, precision=0),
+        gr.Number(label="Summary length (words)", value=200, precision=0),
         gr.Textbox(
             label="Refined Query Template",
             lines=3,
-            # Default matches your original:
+            # قالب برای خلاصه‌سازی بلوک‌ها، فقط شامل {query}
             value=(
                 "Please review and distill the essential insights from the following content in the context "
                 "of '{query}'. Focus on the most pertinent details, providing a clear and concise summary that "
@@ -364,7 +377,7 @@ interface = gr.Interface(
         gr.Textbox(
             label="Final Refined Query Template",
             lines=3,
-            # Default matches your original:
+            # قالب برای خلاصه‌سازی نهایی، شامل {summary_length} و {query}
             value=(
                 "Please compose a well-structured, {summary_length}-word summary of the following material with "
                 "a focus on '{query}'. Prioritize the most impactful information, ensuring clarity and relevance "
@@ -373,15 +386,16 @@ interface = gr.Interface(
         ),
     ],
     outputs=[
-        gr.Textbox(label="Summarized Result", lines=5),
-        gr.Textbox(label="Logs", lines=10, interactive=False)
+        gr.Textbox(label="Summarized Result", lines=15),
+        gr.Textbox(label="Logs", lines=15, interactive=False)
     ],
     title="DuckDuckGo Deep Research",
     description=(
         "Searches the web for a query, fetches content, and summarizes it. "
         "View logs in real-time. You can also customize the prompt templates below."
     ),
-    allow_flagging='never',
+    # Updated parameter to replace the deprecated 'allow_flagging'
+    flagging_mode='never',
 )
 
 # -------------------------------------------------------
